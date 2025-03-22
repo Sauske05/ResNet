@@ -27,42 +27,104 @@ Skip Connection --> Layer 1 to Layer 2 --> nn.Conv2d(256,512,1,2,0) padding is 0
 
 '''
 
-class Block(nn.Module):
-    def __init__(self, in_channels:int, out_channels:int, identity_sample: bool = True, downsample:bool = False):
-        super().__init__()
-        self.conv1 = nn.Conv2d(in_channels, out_channels, 1,1,0)        
-        if downsample:
-            self.conv1 = nn.Conv2d(in_channels, out_channels, 2,1,0)
-        self.conv2 = nn.Conv2d(out_channels, out_channels, 3,1,1)
-        self.conv3 = nn.Conv2d(out_channels, out_channels*4,1,1,0)
-        
-        self.identity = nn.Conv2d(in_channels, out_channels*4,1,2,0)
-        if identity_sample:
-            self.identity = nn.Conv2d(in_channels, out_channels*4, 1,0,1)
-        
-            
-
-    def forward(self,x:torch.tensor):
-        x1 = self.conv1(x)
-        x2 = self.conv2(x1)
-        x3 = self.conv3(x2)
-        x_identity = self.identity(x)
-        print(f'Shape of x {x.shape}')
-        print(f'Shape of x1 {x1.shape}')
-        print(f'Shape of x2 {x2.shape}')
-        print(f'Shape of x3 {x3.shape}')
-        print(f'Shape of x_identity {x_identity.shape}')
-        return x3+ x_identity
-    
+import torch
+import torch.nn as nn
 from typing import List
-class ResNet50(nn.Module):
-    def __init__(self, architecture:List[int]): #[3,4,6,3]
+
+class Block(nn.Module):
+    def __init__(self, in_channels: int, out_channels: int, downsample: bool = False):
         super().__init__()
-        for external_layer in architecture:
-            for x in range(1, external_layer+1):
-                downsample = True if external_layer > 1 and x == 1 else False
-                f'block_{x}' = Block()
-                # if external_layer == 1 and blocks == 1:
-                #     downsample
-    def forward(self,x):
-        pass
+        stride = 2 if downsample else 1
+
+        # Bottleneck layers
+        self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=stride, padding=0)
+        self.bn1 = nn.BatchNorm2d(out_channels)
+
+        self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, stride=1, padding=1)
+        self.bn2 = nn.BatchNorm2d(out_channels)
+
+        self.conv3 = nn.Conv2d(out_channels, out_channels * 4, kernel_size=1, stride=1, padding=0)
+        self.bn3 = nn.BatchNorm2d(out_channels * 4)
+
+        # Identity mapping
+        self.identity = nn.Sequential()
+        if in_channels != out_channels * 4 or downsample:
+            self.identity = nn.Sequential(
+                nn.Conv2d(in_channels, out_channels * 4, kernel_size=1, stride=stride),
+                nn.BatchNorm2d(out_channels * 4)
+            )
+
+        self.relu = nn.ReLU(inplace=True)
+
+    def forward(self, x: torch.Tensor):
+        identity = self.identity(x)
+
+        out = self.conv1(x)
+        out = self.bn1(out)
+        out = self.relu(out)
+
+        out = self.conv2(out)
+        out = self.bn2(out)
+        out = self.relu(out)
+
+        out = self.conv3(out)
+        out = self.bn3(out)
+
+        out += identity
+        out = self.relu(out)
+
+        return out
+
+
+class ResNet50(nn.Module):
+    def __init__(self, architecture: List[int], num_classes: int = 10):
+        super().__init__()
+        
+        # Initial convolutional layer (ResNet Stem)
+        self.stem = nn.Sequential(
+            nn.Conv2d(3, 64, kernel_size=1, stride=1, padding=0),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True),
+            #nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
+        )
+
+        # Residual layers
+        self.in_channels = 64
+        self.layer1 = self._make_layer(64, architecture[0])
+        self.layer2 = self._make_layer(128, architecture[1], downsample=True)
+        self.layer3 = self._make_layer(256, architecture[2], downsample=True)
+        self.layer4 = self._make_layer(512, architecture[3], downsample=True)
+
+        # Fully connected layer (Classifier)
+        self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
+        self.fc = nn.Linear(512 * 4, num_classes)
+
+    def _make_layer(self, out_channels: int, blocks: int, downsample: bool = False):
+        layers = []
+        layers.append(Block(self.in_channels, out_channels, downsample))
+        self.in_channels = out_channels * 4  # After first block, update input channels
+        
+        for _ in range(1, blocks):
+            layers.append(Block(self.in_channels, out_channels, downsample=False))
+        
+        return nn.Sequential(*layers)
+
+    def forward(self, x):
+        x = self.stem(x)
+        x = self.layer1(x)
+        x = self.layer2(x)
+        x = self.layer3(x)
+        x = self.layer4(x)
+        x = self.avgpool(x)
+        x = torch.flatten(x, 1)
+        x = self.fc(x)
+        return x
+
+
+
+if __name__ == '__main__':
+
+    resnet50 = ResNet50([3, 4, 6, 3])  
+    image_sample = torch.rand(4,3,32,32)
+    output = resnet50(image_sample)
+    print(output.shape)
